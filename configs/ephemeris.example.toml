@@ -1,0 +1,32 @@
+[data]
+root = "/var/lib/ephemeris"
+archive = "/var/lib/ephemeris/archive"
+
+[logging]
+level = "info"
+
+[server]
+bind = "0.0.0.0:8080"
+
+[demo]
+enabled = true
+interval_seconds = 30
+
+[station]
+latitude = 0.0
+longitude = 0.0
+altitude = 0.0
+min_elevation = 10
+use_gpsd = false
+gpsd_host = "localhost:2947"
+
+[sdr]
+device_index = 0
+gain = 40.0
+ppm_correction = 0
+sample_rate = 48000
+
+[predict]
+tle_url = "https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle"
+tle_refresh_hours = 24
+lookahead_hours = 24
