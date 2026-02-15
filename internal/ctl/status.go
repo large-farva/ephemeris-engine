@@ -1,9 +1,7 @@
 package ctl
 
 import (
-	"encoding/json"
 	"fmt"
-	"net/http"
 	"strings"
 	"time"
 )
@@ -18,23 +16,16 @@ type StatusResponse struct {
 }
 
 // Status fetches the daemon status and prints a formatted summary.
-func Status(baseURL string) error {
+func Status(baseURL string, jsonOutput bool) error {
 	baseURL = strings.TrimRight(baseURL, "/")
 
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Get(baseURL + "/api/status")
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("unexpected status: %s", resp.Status)
-	}
-
 	var s StatusResponse
-	if err := json.NewDecoder(resp.Body).Decode(&s); err != nil {
+	if err := getJSON(baseURL, "/api/status", &s); err != nil {
 		return err
+	}
+
+	if jsonOutput {
+		return printJSON(s)
 	}
 
 	uptime := formatDuration(time.Duration(s.UptimeSeconds) * time.Second)

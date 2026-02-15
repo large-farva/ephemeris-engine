@@ -40,7 +40,7 @@ ephctl --host http://192.168.8.1:8080 watch
 
 ## Configuration
 
-See [configs/ephemeris.example.toml](configs/ephemeris.example.toml) for all available options.
+See [configs/example.toml](configs/example.toml) for all available options.
 
 ## License
 

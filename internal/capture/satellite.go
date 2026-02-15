@@ -2,6 +2,8 @@
 // from a real RTL-SDR dongle or via synthetic tone generation for testing.
 package capture
 
+import "strings"
+
 // Satellite describes a NOAA APT bird: its common name, NORAD catalog
 // number, and downlink frequency in hertz.
 type Satellite struct {
@@ -23,6 +25,18 @@ var Satellites = []Satellite{
 func SatelliteByNoradID(id int) *Satellite {
 	for i := range Satellites {
 		if Satellites[i].NoradID == id {
+			return &Satellites[i]
+		}
+	}
+	return nil
+}
+
+// SatelliteByName returns the satellite with the given name (case-insensitive),
+// or nil if not found.
+func SatelliteByName(name string) *Satellite {
+	upper := strings.ToUpper(name)
+	for i := range Satellites {
+		if strings.ToUpper(Satellites[i].Name) == upper {
 			return &Satellites[i]
 		}
 	}

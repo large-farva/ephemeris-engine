@@ -12,53 +12,53 @@ import (
 
 // Config is the top-level configuration, mirroring the TOML sections.
 type Config struct {
-	Data    DataConfig    `toml:"data"`
-	Logging LoggingConfig `toml:"logging"`
-	Server  ServerConfig  `toml:"server"`
-	Demo    DemoConfig    `toml:"demo"`
-	Station StationConfig `toml:"station"`
-	SDR     SDRConfig     `toml:"sdr"`
-	Predict PredictConfig `toml:"predict"`
+	Data    DataConfig    `toml:"data"    json:"data"`
+	Logging LoggingConfig `toml:"logging" json:"logging"`
+	Server  ServerConfig  `toml:"server"  json:"server"`
+	Demo    DemoConfig    `toml:"demo"    json:"demo"`
+	Station StationConfig `toml:"station" json:"station"`
+	SDR     SDRConfig     `toml:"sdr"     json:"sdr"`
+	Predict PredictConfig `toml:"predict" json:"predict"`
 }
 
 type DataConfig struct {
-	Root    string `toml:"root"`
-	Archive string `toml:"archive"`
+	Root    string `toml:"root"    json:"root"`
+	Archive string `toml:"archive" json:"archive"`
 }
 
 type LoggingConfig struct {
-	Level string `toml:"level"`
+	Level string `toml:"level" json:"level"`
 }
 
 type ServerConfig struct {
-	Bind string `toml:"bind"`
+	Bind string `toml:"bind" json:"bind"`
 }
 
 type DemoConfig struct {
-	Enabled         bool `toml:"enabled"`
-	IntervalSeconds int  `toml:"interval_seconds"`
+	Enabled         bool `toml:"enabled"          json:"enabled"`
+	IntervalSeconds int  `toml:"interval_seconds" json:"interval_seconds"`
 }
 
 type StationConfig struct {
-	Latitude     float64 `toml:"latitude"`
-	Longitude    float64 `toml:"longitude"`
-	Altitude     float64 `toml:"altitude"`
-	MinElevation float64 `toml:"min_elevation"`
-	UseGPSD      bool    `toml:"use_gpsd"`
-	GPSDHost     string  `toml:"gpsd_host"`
+	Latitude     float64 `toml:"latitude"      json:"latitude"`
+	Longitude    float64 `toml:"longitude"     json:"longitude"`
+	Altitude     float64 `toml:"altitude"      json:"altitude"`
+	MinElevation float64 `toml:"min_elevation" json:"min_elevation"`
+	UseGPSD      bool    `toml:"use_gpsd"      json:"use_gpsd"`
+	GPSDHost     string  `toml:"gpsd_host"     json:"gpsd_host"`
 }
 
 type SDRConfig struct {
-	DeviceIndex   int     `toml:"device_index"`
-	Gain          float64 `toml:"gain"`
-	PPMCorrection int     `toml:"ppm_correction"`
-	SampleRate    int     `toml:"sample_rate"`
+	DeviceIndex   int     `toml:"device_index"   json:"device_index"`
+	Gain          float64 `toml:"gain"           json:"gain"`
+	PPMCorrection int     `toml:"ppm_correction" json:"ppm_correction"`
+	SampleRate    int     `toml:"sample_rate"    json:"sample_rate"`
 }
 
 type PredictConfig struct {
-	TLEURL          string `toml:"tle_url"`
-	TLERefreshHours int    `toml:"tle_refresh_hours"`
-	LookaheadHours  int    `toml:"lookahead_hours"`
+	TLEURL          string `toml:"tle_url"           json:"tle_url"`
+	TLERefreshHours int    `toml:"tle_refresh_hours" json:"tle_refresh_hours"`
+	LookaheadHours  int    `toml:"lookahead_hours"   json:"lookahead_hours"`
 }
 
 // Default returns a Config populated with sane defaults. Values here are

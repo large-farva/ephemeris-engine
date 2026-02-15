@@ -36,7 +36,8 @@ type App struct {
 	startedAt time.Time
 	state     atomic.Value // current state string (BOOTING, IDLE, etc.)
 
-	wsHub *ws.Hub
+	wsHub     *ws.Hub
+	scheduler *scheduler.Runner // nil in demo mode
 }
 
 // New creates an App in the BOOTING state. Call Run to start serving.
@@ -67,6 +68,12 @@ func (a *App) Run(ctx context.Context) error {
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", a.handleHealthz)
 	mux.HandleFunc("/api/status", a.handleStatus)
+	mux.HandleFunc("/api/version", a.handleVersion)
+	mux.HandleFunc("/api/satellites", a.handleSatellites)
+	mux.HandleFunc("/api/config", a.handleConfig)
+	mux.HandleFunc("/api/passes", a.handlePasses)
+	mux.HandleFunc("/api/trigger", a.handleTrigger)
+	mux.HandleFunc("/api/tle-refresh", a.handleTLERefresh)
 	mux.Handle("/ws", a.wsHub.Handler())
 
 	a.server = &http.Server{
@@ -93,8 +100,8 @@ func (a *App) Run(ctx context.Context) error {
 		}
 		go r.Run(ctx, a.setStateFromDemo)
 	} else {
-		s := scheduler.New(a.wsHub, a.cfg, a.log)
-		go s.Run(ctx, a.setStateFromScheduler)
+		a.scheduler = scheduler.New(a.wsHub, a.cfg, a.log)
+		go a.scheduler.Run(ctx, a.setStateFromScheduler)
 	}
 
 	go func() {

@@ -13,9 +13,15 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// WatchOptions controls the watch command behavior.
+type WatchOptions struct {
+	Filter []string // event types to show (empty = all)
+	JSON   bool     // output raw JSON per event
+}
+
 // Watch connects to the daemon's WebSocket endpoint and streams events to
 // the terminal in a human-readable format until interrupted.
-func Watch(baseURL string) error {
+func Watch(baseURL string, opts WatchOptions) error {
 	baseURL = strings.TrimRight(baseURL, "/")
 
 	u, err := url.Parse(baseURL)
@@ -40,10 +46,21 @@ func Watch(baseURL string) error {
 	}
 	defer conn.Close()
 
-	fmt.Println()
-	fmt.Printf("  %s %s\n", colorize(green, "connected"), colorize(dim, u.String()))
-	fmt.Println(colorize(dim, "  "+strings.Repeat("─", 50)))
-	fmt.Println()
+	if !opts.JSON {
+		fmt.Println()
+		fmt.Printf("  %s %s\n", colorize(green, "connected"), colorize(dim, u.String()))
+		if len(opts.Filter) > 0 {
+			fmt.Printf("  %s %s\n", colorize(dim, "filter:"), colorize(dim, strings.Join(opts.Filter, ", ")))
+		}
+		fmt.Println(colorize(dim, "  "+strings.Repeat("─", 50)))
+		fmt.Println()
+	}
+
+	// Build a filter set for O(1) lookup.
+	filterSet := make(map[string]bool, len(opts.Filter))
+	for _, f := range opts.Filter {
+		filterSet[f] = true
+	}
 
 	done := make(chan struct{})
 	go func() {
@@ -53,7 +70,23 @@ func Watch(baseURL string) error {
 			if err != nil {
 				return
 			}
-			renderEvent(msg)
+
+			// Apply event type filter.
+			if len(filterSet) > 0 {
+				var ev map[string]any
+				if err := json.Unmarshal(msg, &ev); err == nil {
+					evType, _ := ev["type"].(string)
+					if !filterSet[evType] {
+						continue
+					}
+				}
+			}
+
+			if opts.JSON {
+				fmt.Println(string(msg))
+			} else {
+				renderEvent(msg)
+			}
 		}
 	}()
 
@@ -62,8 +95,10 @@ func Watch(baseURL string) error {
 
 	select {
 	case <-sig:
-		fmt.Println()
-		fmt.Println(colorize(dim, "  disconnecting..."))
+		if !opts.JSON {
+			fmt.Println()
+			fmt.Println(colorize(dim, "  disconnecting..."))
+		}
 		_ = conn.WriteControl(
 			websocket.CloseMessage,
 			websocket.FormatCloseMessage(websocket.CloseNormalClosure, "bye"),

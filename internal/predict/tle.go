@@ -131,6 +131,20 @@ func (s *TLEStore) writeCache(cachePath, data string) error {
 	return os.Rename(tmp.Name(), cachePath)
 }
 
+// ForceRefresh fetches TLEs from the network regardless of cache age,
+// updates the disk cache, and returns the parsed NOAA TLEs.
+func (s *TLEStore) ForceRefresh() (map[int]*sgp4.TLE, error) {
+	cachePath := filepath.Join(s.dataRoot, tleCacheFile)
+
+	body, err := s.fetchFromNetwork()
+	if err != nil {
+		return nil, err
+	}
+
+	_ = s.writeCache(cachePath, body)
+	return s.parseForNOAA(body)
+}
+
 // parseForNOAA extracts TLEs for the hardcoded NOAA satellites from a bulk
 // TLE text dump. Input is expected in standard 3-line format (name, line 1,
 // line 2) as served by CelesTrak.

@@ -5,6 +5,7 @@ package scheduler
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"time"
@@ -15,12 +16,32 @@ import (
 	"github.com/large-farva/ephemeris-engine/internal/ws"
 )
 
+// Command represents an external command sent to the scheduler via its
+// Commands channel. The Reply channel receives exactly one result.
+type Command struct {
+	Type    string
+	Payload json.RawMessage
+	Reply   chan<- CommandResult
+}
+
+// CommandResult is the response sent back through a Command's Reply channel.
+type CommandResult struct {
+	OK                bool   `json:"ok"`
+	Message           string `json:"message,omitempty"`
+	Error             string `json:"error,omitempty"`
+	SatellitesUpdated int    `json:"satellites_updated,omitempty"`
+}
+
 // Runner owns the main scheduling loop, coordinating the predictor and
 // capture runner through each satellite pass.
 type Runner struct {
 	Hub *ws.Hub
 	Cfg config.Config
 	Log *log.Logger
+
+	// Commands receives external commands (trigger, tle_refresh) from HTTP
+	// handlers. The scheduler checks this channel during wait periods.
+	Commands chan Command
 
 	predictor *predict.Predictor
 	capturer  *capture.Runner
@@ -32,6 +53,7 @@ func New(hub *ws.Hub, cfg config.Config, logger *log.Logger) *Runner {
 		Hub:       hub,
 		Cfg:       cfg,
 		Log:       logger,
+		Commands:  make(chan Command, 4),
 		predictor: predict.NewPredictor(hub, cfg, logger),
 		capturer:  capture.New(hub, cfg, logger, false),
 	}
@@ -68,8 +90,11 @@ func (r *Runner) Run(ctx context.Context, setState func(string)) {
 				"level":   "error",
 				"message": "prediction failed: " + err.Error(),
 			})
-			if !sleepOrCancel(ctx, 5*time.Minute) {
-				return
+			if r.sleepOrCommand(ctx, 5*time.Minute, setState) != sleepCompleted {
+				if ctx.Err() != nil {
+					return
+				}
+				continue
 			}
 			continue
 		}
@@ -90,8 +115,11 @@ func (r *Runner) Run(ctx context.Context, setState func(string)) {
 				"message": "no upcoming passes, will recompute later",
 			})
 			refreshDur := time.Duration(r.Cfg.Predict.TLERefreshHours) * time.Hour
-			if !sleepOrCancel(ctx, refreshDur) {
-				return
+			if r.sleepOrCommand(ctx, refreshDur, setState) != sleepCompleted {
+				if ctx.Err() != nil {
+					return
+				}
+				continue
 			}
 			continue
 		}
@@ -125,8 +153,12 @@ func (r *Runner) Run(ctx context.Context, setState func(string)) {
 				"duration_s": int(pass.Duration.Seconds()),
 			})
 
-			if !r.waitForAOS(ctx, pass) {
-				return
+			if !r.waitForAOS(ctx, pass, setState) {
+				if ctx.Err() != nil {
+					return
+				}
+				// A command interrupted the wait; break to recompute passes.
+				break
 			}
 
 			req := capture.CaptureRequest{
@@ -160,9 +192,36 @@ func (r *Runner) Run(ctx context.Context, setState func(string)) {
 	}
 }
 
+// sleepResult indicates what ended a sleep period.
+type sleepResult int
+
+const (
+	sleepCompleted   sleepResult = iota // timer expired normally
+	sleepCancelled                      // context was cancelled
+	sleepInterrupted                    // a command was received and handled
+)
+
+// sleepOrCommand blocks for duration d, until ctx is cancelled, or until a
+// command arrives on r.Commands. Commands are handled inline. Returns what
+// ended the sleep.
+func (r *Runner) sleepOrCommand(ctx context.Context, d time.Duration, setState func(string)) sleepResult {
+	t := time.NewTimer(d)
+	defer t.Stop()
+	select {
+	case <-ctx.Done():
+		return sleepCancelled
+	case <-t.C:
+		return sleepCompleted
+	case cmd := <-r.Commands:
+		r.handleCommand(ctx, cmd, setState)
+		return sleepInterrupted
+	}
+}
+
 // waitForAOS sleeps until AOS, broadcasting countdown progress every 30s.
-// Returns false if the context was cancelled.
-func (r *Runner) waitForAOS(ctx context.Context, pass predict.Pass) bool {
+// Returns true if AOS was reached, false if interrupted (by context cancel
+// or a command).
+func (r *Runner) waitForAOS(ctx context.Context, pass predict.Pass, setState func(string)) bool {
 	for {
 		remaining := time.Until(pass.AOS)
 		if remaining <= 0 {
@@ -180,9 +239,92 @@ func (r *Runner) waitForAOS(ctx context.Context, pass predict.Pass) bool {
 		if remaining < sleepDur {
 			sleepDur = remaining
 		}
-		if !sleepOrCancel(ctx, sleepDur) {
+		result := r.sleepOrCommand(ctx, sleepDur, setState)
+		if result == sleepCancelled || result == sleepInterrupted {
 			return false
 		}
+	}
+}
+
+// handleCommand dispatches an incoming command to the appropriate handler.
+func (r *Runner) handleCommand(ctx context.Context, cmd Command, setState func(string)) {
+	switch cmd.Type {
+	case "trigger":
+		r.handleTriggerCommand(ctx, cmd, setState)
+	case "tle_refresh":
+		r.handleTLERefreshCommand(cmd)
+	default:
+		cmd.Reply <- CommandResult{OK: false, Error: "unknown command: " + cmd.Type}
+	}
+}
+
+// handleTriggerCommand starts an immediate capture for the requested satellite.
+func (r *Runner) handleTriggerCommand(ctx context.Context, cmd Command, setState func(string)) {
+	var payload struct {
+		NoradID         int `json:"norad_id"`
+		DurationSeconds int `json:"duration_seconds"`
+	}
+	if err := json.Unmarshal(cmd.Payload, &payload); err != nil {
+		cmd.Reply <- CommandResult{OK: false, Error: "invalid payload: " + err.Error()}
+		return
+	}
+
+	sat := capture.SatelliteByNoradID(payload.NoradID)
+	if sat == nil {
+		cmd.Reply <- CommandResult{OK: false, Error: fmt.Sprintf("unknown NORAD ID: %d", payload.NoradID)}
+		return
+	}
+
+	dur := time.Duration(payload.DurationSeconds) * time.Second
+	now := time.Now().UTC()
+
+	r.broadcast(map[string]any{
+		"type":    "log",
+		"level":   "info",
+		"message": fmt.Sprintf("manual trigger: capturing %s for %s", sat.Name, dur.Truncate(time.Second)),
+	})
+
+	// Reply immediately so the HTTP handler is not blocked during capture.
+	cmd.Reply <- CommandResult{
+		OK:      true,
+		Message: fmt.Sprintf("capture triggered for %s (%s)", sat.Name, dur.Truncate(time.Second)),
+	}
+
+	req := capture.CaptureRequest{
+		Satellite: *sat,
+		AOS:       now,
+		LOS:       now.Add(dur),
+		MaxElev:   90,
+	}
+	if _, err := r.capturer.Capture(ctx, req, setState); err != nil {
+		r.broadcast(map[string]any{
+			"type":    "log",
+			"level":   "error",
+			"message": "triggered capture failed: " + err.Error(),
+		})
+	}
+
+	setState("IDLE")
+}
+
+// handleTLERefreshCommand forces an immediate TLE data refresh.
+func (r *Runner) handleTLERefreshCommand(cmd Command) {
+	n, err := r.predictor.ForceRefreshTLEs()
+	if err != nil {
+		cmd.Reply <- CommandResult{OK: false, Error: "TLE refresh failed: " + err.Error()}
+		return
+	}
+
+	r.broadcast(map[string]any{
+		"type":    "log",
+		"level":   "info",
+		"message": fmt.Sprintf("TLE data refreshed, %d satellites updated", n),
+	})
+
+	cmd.Reply <- CommandResult{
+		OK:                true,
+		Message:           fmt.Sprintf("TLE data refreshed, %d satellites updated", n),
+		SatellitesUpdated: n,
 	}
 }
 

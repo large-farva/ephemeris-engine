@@ -148,6 +148,16 @@ func (p *Predictor) ComputePasses() ([]Pass, error) {
 	return allPasses, nil
 }
 
+// ForceRefreshTLEs fetches TLEs from the network regardless of cache age
+// and returns the number of satellites updated.
+func (p *Predictor) ForceRefreshTLEs() (int, error) {
+	tles, err := p.tleStore.ForceRefresh()
+	if err != nil {
+		return 0, err
+	}
+	return len(tles), nil
+}
+
 func (p *Predictor) broadcast(v map[string]any) {
 	v["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
 	v["component"] = "predict"
