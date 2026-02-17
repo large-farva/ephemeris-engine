@@ -74,6 +74,20 @@ func postJSON(baseURL, path string, body, dst any) error {
 	return json.NewDecoder(resp.Body).Decode(dst)
 }
 
+// decodeJSON decodes a JSON response body into dst. It checks the status code
+// and returns an error with the body for non-2xx responses.
+func decodeJSON(resp *http.Response, dst any) error {
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		msg := strings.TrimSpace(string(b))
+		if msg != "" {
+			return fmt.Errorf("HTTP %s: %s", resp.Status, msg)
+		}
+		return fmt.Errorf("HTTP %s", resp.Status)
+	}
+	return json.NewDecoder(resp.Body).Decode(dst)
+}
+
 // printJSON prints v as indented JSON to stdout.
 func printJSON(v any) error {
 	b, err := json.MarshalIndent(v, "", "  ")

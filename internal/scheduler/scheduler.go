@@ -8,6 +8,9 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"os"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/large-farva/ephemeris-engine/internal/capture"
@@ -15,6 +18,17 @@ import (
 	"github.com/large-farva/ephemeris-engine/internal/predict"
 	"github.com/large-farva/ephemeris-engine/internal/ws"
 )
+
+// PassInfo mirrors the app.PassInfo struct for callback typing.
+type PassInfo struct {
+	Satellite string  `json:"satellite"`
+	NoradID   int     `json:"norad_id"`
+	FreqHz    int     `json:"freq_hz"`
+	AOS       string  `json:"aos"`
+	LOS       string  `json:"los"`
+	MaxElev   float64 `json:"max_elev"`
+	Stage     string  `json:"stage"`
+}
 
 // Command represents an external command sent to the scheduler via its
 // Commands channel. The Reply channel receives exactly one result.
@@ -39,12 +53,23 @@ type Runner struct {
 	Cfg config.Config
 	Log *log.Logger
 
-	// Commands receives external commands (trigger, tle_refresh) from HTTP
-	// handlers. The scheduler checks this channel during wait periods.
+	// Commands receives external commands from HTTP handlers.
+	// The scheduler checks this channel during wait periods.
 	Commands chan Command
 
 	predictor *predict.Predictor
 	capturer  *capture.Runner
+
+	// Pause state.
+	paused atomic.Bool
+
+	// Cancel support: when a capture is active, captureCancel can abort it.
+	captureMu     sync.Mutex
+	captureCancel context.CancelFunc
+
+	// Callbacks into the app layer.
+	passCallback    func(*PassInfo)
+	captureCallback func(satellite string, bytesWritten int64)
 }
 
 // New creates a scheduler with its own predictor and capture runner.
@@ -59,9 +84,22 @@ func New(hub *ws.Hub, cfg config.Config, logger *log.Logger) *Runner {
 	}
 }
 
-// Run is the main scheduler loop. It follows the same pattern as
-// demo.Runner.Run: accepts a context for cancellation and a setState
-// callback for state transitions.
+// SetPassCallback registers a function called when the current pass changes.
+func (r *Runner) SetPassCallback(fn func(*PassInfo)) {
+	r.passCallback = fn
+}
+
+// SetCaptureCallback registers a function called when a capture completes.
+func (r *Runner) SetCaptureCallback(fn func(string, int64)) {
+	r.captureCallback = fn
+}
+
+// IsPaused reports whether the scheduler is paused.
+func (r *Runner) IsPaused() bool {
+	return r.paused.Load()
+}
+
+// Run is the main scheduler loop.
 //
 // Lifecycle:
 //  1. Compute passes (IDLE state)
@@ -81,6 +119,22 @@ func (r *Runner) Run(ctx context.Context, setState func(string)) {
 	for {
 		if ctx.Err() != nil {
 			return
+		}
+
+		// If paused, wait until resumed or a command arrives.
+		if r.paused.Load() {
+			setState("IDLE")
+			r.notifyPass(nil)
+			r.broadcast(map[string]any{
+				"type":    "log",
+				"level":   "info",
+				"message": "scheduler paused, waiting for resume",
+			})
+			// Sleep for a very long time; a resume command will interrupt.
+			if r.sleepOrCommand(ctx, 24*365*time.Hour, setState) == sleepCancelled {
+				return
+			}
+			continue
 		}
 
 		passes, err := r.predictor.ComputePasses()
@@ -134,7 +188,22 @@ func (r *Runner) Run(ctx context.Context, setState func(string)) {
 				continue
 			}
 
+			// If paused while iterating, break to recompute.
+			if r.paused.Load() {
+				break
+			}
+
 			setState("WAITING_FOR_PASS")
+
+			r.notifyPass(&PassInfo{
+				Satellite: pass.Satellite.Name,
+				NoradID:   pass.Satellite.NoradID,
+				FreqHz:    pass.Satellite.Freq,
+				AOS:       pass.AOS.Format(time.RFC3339),
+				LOS:       pass.LOS.Format(time.RFC3339),
+				MaxElev:   pass.MaxElev,
+				Stage:     "waiting",
+			})
 
 			r.broadcast(map[string]any{
 				"type":    "log",
@@ -161,6 +230,17 @@ func (r *Runner) Run(ctx context.Context, setState func(string)) {
 				break
 			}
 
+			// Update pass stage to recording.
+			r.notifyPass(&PassInfo{
+				Satellite: pass.Satellite.Name,
+				NoradID:   pass.Satellite.NoradID,
+				FreqHz:    pass.Satellite.Freq,
+				AOS:       pass.AOS.Format(time.RFC3339),
+				LOS:       pass.LOS.Format(time.RFC3339),
+				MaxElev:   pass.MaxElev,
+				Stage:     "recording",
+			})
+
 			req := capture.CaptureRequest{
 				Satellite: pass.Satellite,
 				AOS:       pass.AOS,
@@ -168,16 +248,45 @@ func (r *Runner) Run(ctx context.Context, setState func(string)) {
 				MaxElev:   pass.MaxElev,
 			}
 
-			if _, err := r.capturer.Capture(ctx, req, setState); err != nil {
+			// Create a cancellable child context for this capture.
+			captureCtx, captureCancel := context.WithCancel(ctx)
+			r.captureMu.Lock()
+			r.captureCancel = captureCancel
+			r.captureMu.Unlock()
+
+			outPath, err := r.capturer.Capture(captureCtx, req, setState)
+			captureCancel()
+
+			r.captureMu.Lock()
+			r.captureCancel = nil
+			r.captureMu.Unlock()
+
+			if err != nil {
 				r.broadcast(map[string]any{
 					"type":    "log",
 					"level":   "error",
 					"message": "capture failed: " + err.Error(),
 				})
+			} else if outPath != "" {
+				// Notify stats callback.
+				if r.captureCallback != nil {
+					if info, statErr := captureFileSize(outPath); statErr == nil {
+						r.captureCallback(pass.Satellite.Name, info)
+					}
+				}
 			}
 
-			// TODO: APT decoding — this is it'll process the WAV into an image.
+			// TODO: APT decoding — this is where it'll process the WAV into an image.
 			setState("DECODING")
+			r.notifyPass(&PassInfo{
+				Satellite: pass.Satellite.Name,
+				NoradID:   pass.Satellite.NoradID,
+				FreqHz:    pass.Satellite.Freq,
+				AOS:       pass.AOS.Format(time.RFC3339),
+				LOS:       pass.LOS.Format(time.RFC3339),
+				MaxElev:   pass.MaxElev,
+				Stage:     "decoding",
+			})
 			r.broadcast(map[string]any{
 				"type":    "log",
 				"level":   "info",
@@ -187,8 +296,16 @@ func (r *Runner) Run(ctx context.Context, setState func(string)) {
 				return
 			}
 
+			r.notifyPass(nil)
 			setState("IDLE")
 		}
+	}
+}
+
+// notifyPass calls the pass callback if set.
+func (r *Runner) notifyPass(info *PassInfo) {
+	if r.passCallback != nil {
+		r.passCallback(info)
 	}
 }
 
@@ -253,6 +370,14 @@ func (r *Runner) handleCommand(ctx context.Context, cmd Command, setState func(s
 		r.handleTriggerCommand(ctx, cmd, setState)
 	case "tle_refresh":
 		r.handleTLERefreshCommand(cmd)
+	case "pause":
+		r.handlePauseCommand(cmd)
+	case "resume":
+		r.handleResumeCommand(cmd)
+	case "skip":
+		r.handleSkipCommand(cmd)
+	case "cancel":
+		r.handleCancelCommand(cmd)
 	default:
 		cmd.Reply <- CommandResult{OK: false, Error: "unknown command: " + cmd.Type}
 	}
@@ -296,12 +421,29 @@ func (r *Runner) handleTriggerCommand(ctx context.Context, cmd Command, setState
 		LOS:       now.Add(dur),
 		MaxElev:   90,
 	}
-	if _, err := r.capturer.Capture(ctx, req, setState); err != nil {
+
+	captureCtx, captureCancel := context.WithCancel(ctx)
+	r.captureMu.Lock()
+	r.captureCancel = captureCancel
+	r.captureMu.Unlock()
+
+	outPath, err := r.capturer.Capture(captureCtx, req, setState)
+	captureCancel()
+
+	r.captureMu.Lock()
+	r.captureCancel = nil
+	r.captureMu.Unlock()
+
+	if err != nil {
 		r.broadcast(map[string]any{
 			"type":    "log",
 			"level":   "error",
 			"message": "triggered capture failed: " + err.Error(),
 		})
+	} else if outPath != "" && r.captureCallback != nil {
+		if size, statErr := captureFileSize(outPath); statErr == nil {
+			r.captureCallback(sat.Name, size)
+		}
 	}
 
 	setState("IDLE")
@@ -328,6 +470,63 @@ func (r *Runner) handleTLERefreshCommand(cmd Command) {
 	}
 }
 
+func (r *Runner) handlePauseCommand(cmd Command) {
+	if r.paused.Load() {
+		cmd.Reply <- CommandResult{OK: true, Message: "scheduler already paused"}
+		return
+	}
+	r.paused.Store(true)
+	r.broadcast(map[string]any{
+		"type":    "log",
+		"level":   "info",
+		"message": "scheduler paused by user",
+	})
+	cmd.Reply <- CommandResult{OK: true, Message: "scheduler paused"}
+}
+
+func (r *Runner) handleResumeCommand(cmd Command) {
+	if !r.paused.Load() {
+		cmd.Reply <- CommandResult{OK: true, Message: "scheduler already running"}
+		return
+	}
+	r.paused.Store(false)
+	r.broadcast(map[string]any{
+		"type":    "log",
+		"level":   "info",
+		"message": "scheduler resumed by user",
+	})
+	cmd.Reply <- CommandResult{OK: true, Message: "scheduler resumed"}
+}
+
+func (r *Runner) handleSkipCommand(cmd Command) {
+	r.broadcast(map[string]any{
+		"type":    "log",
+		"level":   "info",
+		"message": "skipping current pass by user request",
+	})
+	r.notifyPass(nil)
+	cmd.Reply <- CommandResult{OK: true, Message: "pass skipped, recomputing schedule"}
+}
+
+func (r *Runner) handleCancelCommand(cmd Command) {
+	r.captureMu.Lock()
+	cancel := r.captureCancel
+	r.captureMu.Unlock()
+
+	if cancel == nil {
+		cmd.Reply <- CommandResult{OK: false, Error: "no capture in progress"}
+		return
+	}
+
+	cancel()
+	r.broadcast(map[string]any{
+		"type":    "log",
+		"level":   "info",
+		"message": "capture cancelled by user",
+	})
+	cmd.Reply <- CommandResult{OK: true, Message: "capture cancelled"}
+}
+
 func (r *Runner) broadcast(v map[string]any) {
 	v["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
 	v["component"] = "scheduler"
@@ -345,4 +544,13 @@ func sleepOrCancel(ctx context.Context, d time.Duration) bool {
 	case <-t.C:
 		return true
 	}
+}
+
+// captureFileSize returns the size of a capture file.
+func captureFileSize(path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, err
+	}
+	return info.Size(), nil
 }

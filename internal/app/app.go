@@ -5,10 +5,10 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"log"
 	"net"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -20,35 +20,69 @@ import (
 
 // Options holds everything the App needs from the caller.
 type Options struct {
-	Logger *log.Logger
-	Cfg    config.Config
-	Bind   string
+	Logger     *log.Logger
+	Cfg        config.Config
+	Bind       string
+	ConfigPath string
+}
+
+// logEntry is a single log message stored in the ring buffer.
+type logEntry struct {
+	TS        string `json:"ts"`
+	Level     string `json:"level"`
+	Message   string `json:"message"`
+	Component string `json:"component"`
+}
+
+// stats tracks aggregate capture statistics.
+type stats struct {
+	mu            sync.Mutex
+	TotalCaptures int            `json:"total_captures"`
+	TotalBytes    int64          `json:"total_bytes"`
+	CapturesBySat map[string]int `json:"captures_by_satellite"`
+	LastCaptureAt string         `json:"last_capture_at,omitempty"`
 }
 
 // App is the top-level daemon process. It manages the HTTP server, the
 // WebSocket event hub, and the active runner (scheduler or demo).
 type App struct {
-	log    *log.Logger
-	cfg    config.Config
-	bind   string
-	server *http.Server
+	log        *log.Logger
+	cfg        config.Config
+	cfgMu      sync.RWMutex // protects cfg for hot-reload
+	configPath string
+	bind       string
+	server     *http.Server
 
 	startedAt time.Time
 	state     atomic.Value // current state string (BOOTING, IDLE, etc.)
 
-	wsHub     *ws.Hub
-	scheduler *scheduler.Runner // nil in demo mode
+	wsHub       *ws.Hub
+	scheduler   *scheduler.Runner // nil in demo mode
+	currentPass atomic.Value      // *scheduler.PassInfo or nil
+
+	// Log ring buffer.
+	logBuf    []logEntry
+	logBufMu  sync.Mutex
+	logBufCap int
+
+	captureStats stats
 }
 
 // New creates an App in the BOOTING state. Call Run to start serving.
 func New(opts Options) *App {
 	a := &App{
-		log:       opts.Logger,
-		cfg:       opts.Cfg,
-		bind:      opts.Bind,
-		startedAt: time.Now(),
-		wsHub:     ws.NewHub(),
+		log:        opts.Logger,
+		cfg:        opts.Cfg,
+		configPath: opts.ConfigPath,
+		bind:       opts.Bind,
+		startedAt:  time.Now(),
+		wsHub:      ws.NewHub(),
+		logBufCap:  500,
+		captureStats: stats{
+			CapturesBySat: make(map[string]int),
+		},
 	}
+	a.logBuf = make([]logEntry, 0, a.logBufCap)
 	a.state.Store("BOOTING")
 	return a
 }
@@ -66,6 +100,8 @@ func (a *App) Run(ctx context.Context) error {
 	}
 
 	mux := http.NewServeMux()
+
+	// Core endpoints.
 	mux.HandleFunc("/healthz", a.handleHealthz)
 	mux.HandleFunc("/api/status", a.handleStatus)
 	mux.HandleFunc("/api/version", a.handleVersion)
@@ -75,6 +111,24 @@ func (a *App) Run(ctx context.Context) error {
 	mux.HandleFunc("/api/trigger", a.handleTrigger)
 	mux.HandleFunc("/api/tle-refresh", a.handleTLERefresh)
 	mux.Handle("/ws", a.wsHub.Handler())
+
+	// Data management.
+	mux.HandleFunc("/api/captures", a.handleCaptures)
+	mux.HandleFunc("/api/config/profiles", a.handleConfigProfiles)
+
+	// Informational.
+	mux.HandleFunc("/api/tle-info", a.handleTLEInfo)
+	mux.HandleFunc("/api/next-pass", a.handleNextPass)
+	mux.HandleFunc("/api/system", a.handleSystem)
+	mux.HandleFunc("/api/logs", a.handleLogs)
+	mux.HandleFunc("/api/stats", a.handleStats)
+
+	// Scheduler controls + reload.
+	mux.HandleFunc("/api/pause", a.handlePause)
+	mux.HandleFunc("/api/resume", a.handleResume)
+	mux.HandleFunc("/api/skip", a.handleSkip)
+	mux.HandleFunc("/api/cancel", a.handleCancel)
+	mux.HandleFunc("/api/reload", a.handleReload)
 
 	a.server = &http.Server{
 		Addr:              bind,
@@ -101,6 +155,8 @@ func (a *App) Run(ctx context.Context) error {
 		go r.Run(ctx, a.setStateFromDemo)
 	} else {
 		a.scheduler = scheduler.New(a.wsHub, a.cfg, a.log)
+		a.scheduler.SetPassCallback(a.onPassUpdate)
+		a.scheduler.SetCaptureCallback(a.onCaptureComplete)
 		go a.scheduler.Run(ctx, a.setStateFromScheduler)
 	}
 
@@ -130,6 +186,11 @@ func (a *App) transition(newState string) {
 		"component": "ephemerisd",
 	}
 	a.wsHub.BroadcastJSON(ev)
+
+	// Clear current pass when returning to IDLE.
+	if newState == "IDLE" {
+		a.currentPass.Store((*scheduler.PassInfo)(nil))
+	}
 }
 
 // heartbeatLoop sends a periodic heartbeat event so clients can detect
@@ -144,31 +205,14 @@ func (a *App) heartbeatLoop(ctx context.Context) {
 			return
 		case <-t.C:
 			ev := map[string]any{
-				"type": "heartbeat",
-				"ts":   time.Now().UTC().Format(time.RFC3339Nano),
+				"type":           "heartbeat",
+				"ts":             time.Now().UTC().Format(time.RFC3339Nano),
 				"uptime_seconds": int64(time.Since(a.startedAt).Seconds()),
 				"state":          a.state.Load().(string),
 			}
 			a.wsHub.BroadcastJSON(ev)
 		}
 	}
-}
-
-func (a *App) handleHealthz(w http.ResponseWriter, _ *http.Request) {
-	w.WriteHeader(http.StatusOK)
-	_, _ = w.Write([]byte("ok\n"))
-}
-
-func (a *App) handleStatus(w http.ResponseWriter, _ *http.Request) {
-	resp := map[string]any{
-		"name":           "ephemeris-engine",
-		"state":          a.state.Load().(string),
-		"uptime_seconds": int64(time.Since(a.startedAt).Seconds()),
-		"data_root":      a.cfg.Data.Root,
-		"archive_dir":    a.cfg.Data.Archive,
-	}
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(resp)
 }
 
 func (a *App) setStateFromDemo(newState string) {
@@ -179,10 +223,55 @@ func (a *App) setStateFromScheduler(newState string) {
 	a.transition(newState)
 }
 
+// onPassUpdate is called by the scheduler when tracking a pass.
+func (a *App) onPassUpdate(info *scheduler.PassInfo) {
+	a.currentPass.Store(info)
+}
+
+// onCaptureComplete is called when a capture finishes, to update stats.
+func (a *App) onCaptureComplete(satellite string, bytesWritten int64) {
+	a.captureStats.mu.Lock()
+	defer a.captureStats.mu.Unlock()
+	a.captureStats.TotalCaptures++
+	a.captureStats.TotalBytes += bytesWritten
+	a.captureStats.CapturesBySat[satellite]++
+	a.captureStats.LastCaptureAt = time.Now().UTC().Format(time.RFC3339)
+}
+
+// appendLog adds a log entry to the ring buffer.
+func (a *App) appendLog(entry logEntry) {
+	a.logBufMu.Lock()
+	defer a.logBufMu.Unlock()
+	if len(a.logBuf) >= a.logBufCap {
+		a.logBuf = a.logBuf[1:]
+	}
+	a.logBuf = append(a.logBuf, entry)
+}
+
+// getConfig returns the current config (thread-safe for reload).
+func (a *App) getConfig() config.Config {
+	a.cfgMu.RLock()
+	defer a.cfgMu.RUnlock()
+	return a.cfg
+}
+
 // emit stamps a payload with a timestamp and component name, then pushes it
-// to every connected WebSocket client.
+// to every connected WebSocket client. Log events are also buffered.
 func (a *App) emit(component string, payload map[string]any) {
-	payload["ts"] = time.Now().UTC().Format(time.RFC3339Nano)
+	ts := time.Now().UTC().Format(time.RFC3339Nano)
+	payload["ts"] = ts
 	payload["component"] = component
 	a.wsHub.BroadcastJSON(payload)
+
+	// Buffer log-type events for the /api/logs endpoint.
+	if t, ok := payload["type"].(string); ok && t == "log" {
+		level, _ := payload["level"].(string)
+		msg, _ := payload["message"].(string)
+		a.appendLog(logEntry{
+			TS:        ts,
+			Level:     level,
+			Message:   msg,
+			Component: component,
+		})
+	}
 }

@@ -145,6 +145,39 @@ func (s *TLEStore) ForceRefresh() (map[int]*sgp4.TLE, error) {
 	return s.parseForNOAA(body)
 }
 
+// TLECacheInfo describes the state of the TLE disk cache.
+type TLECacheInfo struct {
+	Path      string `json:"path"`
+	Exists    bool   `json:"exists"`
+	Fresh     bool   `json:"fresh"`
+	ModTime   string `json:"mod_time,omitempty"`
+	AgeS      int    `json:"age_s"`
+	Size      int64  `json:"size"`
+	SourceURL string `json:"source_url"`
+	MaxAgeH   int    `json:"max_age_hours"`
+}
+
+// CacheInfo returns metadata about the TLE disk cache.
+func (s *TLEStore) CacheInfo() TLECacheInfo {
+	info := TLECacheInfo{
+		Path:      filepath.Join(s.dataRoot, tleCacheFile),
+		SourceURL: s.url,
+		MaxAgeH:   int(s.maxAge.Hours()),
+	}
+
+	fi, err := os.Stat(info.Path)
+	if err != nil {
+		return info
+	}
+
+	info.Exists = true
+	info.ModTime = fi.ModTime().UTC().Format(time.RFC3339)
+	info.AgeS = int(time.Since(fi.ModTime()).Seconds())
+	info.Size = fi.Size()
+	info.Fresh = time.Since(fi.ModTime()) < s.maxAge
+	return info
+}
+
 // parseForNOAA extracts TLEs for the hardcoded NOAA satellites from a bulk
 // TLE text dump. Input is expected in standard 3-line format (name, line 1,
 // line 2) as served by CelesTrak.

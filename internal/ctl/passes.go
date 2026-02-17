@@ -86,7 +86,6 @@ func Passes(baseURL string, opts PassesOptions) error {
 		colorize(dim, "Station:"),
 		resp.Station.Lat, resp.Station.Lon, resp.Station.Alt,
 	)
-	fmt.Println(colorize(dim, "  "+strings.Repeat("─", 76)))
 
 	if len(resp.Passes) == 0 {
 		fmt.Println(colorize(dim, "  No upcoming passes found."))
@@ -94,30 +93,19 @@ func Passes(baseURL string, opts PassesOptions) error {
 		return nil
 	}
 
-	fmt.Printf("  %-4s %-12s %-22s %-22s %6s  %s\n",
-		colorize(dim, "#"),
-		colorize(dim, "Satellite"),
-		colorize(dim, "AOS"),
-		colorize(dim, "LOS"),
-		colorize(dim, "Elev"),
-		colorize(dim, "Duration"),
-	)
-	fmt.Println(colorize(dim, "  "+strings.Repeat("─", 76)))
-
+	t := newTable("  ", "#", "Satellite", "AOS", "LOS", "Elev", "Duration")
+	t.alignRight(0, 4)
 	for i, p := range resp.Passes {
-		aosTime := formatPassTime(p.AOS)
-		losTime := formatPassTime(p.LOS)
-		dur := formatDuration(time.Duration(p.DurationS) * time.Second)
-
-		fmt.Printf("  %-4d %-12s %-22s %-22s %5.1f°  %s\n",
-			i+1,
-			colorize(bold, p.Satellite),
-			aosTime,
-			losTime,
-			p.MaxElev,
-			dur,
+		t.row(
+			fmt.Sprintf("%d", i+1),
+			p.Satellite,
+			formatPassTime(p.AOS),
+			formatPassTime(p.LOS),
+			fmt.Sprintf("%.1f°", p.MaxElev),
+			formatDuration(time.Duration(p.DurationS)*time.Second),
 		)
 	}
+	t.flush()
 	fmt.Println()
 
 	return nil

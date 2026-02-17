@@ -1,6 +1,15 @@
+# Ephemeris Engine — Example Configuration
+#
+# Copy to ~/.config/ephemeris/config.toml to get started:
+#   mkdir -p ~/.config/ephemeris
+#   cp configs/example.toml ~/.config/ephemeris/config.toml
+#
+# Multiple profiles can live in ~/.config/ephemeris/ and be listed
+# with: ephctl config-list
+
 [data]
-root = "/var/lib/ephemeris"
-archive = "/var/lib/ephemeris/archive"
+root = "~/.local/share/ephemeris"
+archive = "~/.local/share/ephemeris/archive"
 
 [logging]
 level = "info"
@@ -27,6 +36,6 @@ ppm_correction = 0
 sample_rate = 48000
 
 [predict]
-tle_url = "https://celestrak.org/NORAD/elements/gp.php?GROUP=weather&FORMAT=tle"
+tle_url = "https://celestrak.org/NORAD/elements/gp.php?GROUP=noaa&FORMAT=tle"
 tle_refresh_hours = 24
 lookahead_hours = 24

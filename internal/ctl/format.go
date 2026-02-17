@@ -105,6 +105,107 @@ func formatBytes(b int64) string {
 	}
 }
 
+// table renders aligned columns with dynamic widths.
+// Headers are dimmed, columns are separated by padding, and a separator
+// line is drawn between the header and data rows.
+type table struct {
+	prefix  string     // indent printed before each line
+	headers []string   // column names
+	rows    [][]string // data rows
+	right   []bool     // per-column right-alignment flag
+}
+
+// newTable creates a table with the given line prefix and column headers.
+func newTable(prefix string, headers ...string) *table {
+	return &table{
+		prefix:  prefix,
+		headers: headers,
+		right:   make([]bool, len(headers)),
+	}
+}
+
+// alignRight marks the column at index i as right-aligned.
+func (t *table) alignRight(cols ...int) *table {
+	for _, i := range cols {
+		if i < len(t.right) {
+			t.right[i] = true
+		}
+	}
+	return t
+}
+
+// row appends a data row. Values beyond the column count are ignored.
+func (t *table) row(cols ...string) {
+	t.rows = append(t.rows, cols)
+}
+
+// flush measures column widths and prints the table.
+func (t *table) flush() {
+	widths := make([]int, len(t.headers))
+	for i, h := range t.headers {
+		widths[i] = len(h)
+	}
+	for _, row := range t.rows {
+		for i := range row {
+			if i < len(widths) && len(row[i]) > widths[i] {
+				widths[i] = len(row[i])
+			}
+		}
+	}
+
+	// Total width for the separator line.
+	total := 0
+	for _, w := range widths {
+		total += w
+	}
+	total += (len(widths) - 1) * 2 // two-space gap between columns
+
+	// Header row.
+	line := t.prefix
+	for i, h := range t.headers {
+		if i > 0 {
+			line += "  "
+		}
+		if t.right[i] {
+			line += padLeft(h, widths[i])
+		} else {
+			line += padRight(h, widths[i])
+		}
+	}
+	fmt.Println(colorize(dim, line))
+
+	// Separator.
+	fmt.Println(colorize(dim, t.prefix+strings.Repeat("─", total)))
+
+	// Data rows.
+	for _, row := range t.rows {
+		line := t.prefix
+		for i := range t.headers {
+			if i > 0 {
+				line += "  "
+			}
+			cell := ""
+			if i < len(row) {
+				cell = row[i]
+			}
+			if t.right[i] {
+				line += padLeft(cell, widths[i])
+			} else {
+				line += padRight(cell, widths[i])
+			}
+		}
+		fmt.Println(line)
+	}
+}
+
+// padLeft pads s with leading spaces to reach the given width.
+func padLeft(s string, width int) string {
+	if len(s) >= width {
+		return s
+	}
+	return strings.Repeat(" ", width-len(s)) + s
+}
+
 // progressBar builds a simple ASCII bar of the given width.
 // The filled portion is colored green when color output is enabled.
 func progressBar(pct, width int) string {

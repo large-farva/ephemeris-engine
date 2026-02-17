@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Config fetches and displays the daemon's running configuration.
@@ -108,5 +109,49 @@ func Config(baseURL string, jsonOutput bool) error {
 
 	fmt.Println()
 
+	return nil
+}
+
+// ConfigList shows available config profiles from the config directory.
+func ConfigList(baseURL string, jsonOutput bool) error {
+	baseURL = strings.TrimRight(baseURL, "/")
+
+	var resp struct {
+		ConfigDir string `json:"config_dir"`
+		Profiles  []struct {
+			Name    string `json:"name"`
+			Path    string `json:"path"`
+			ModTime string `json:"mod_time"`
+		} `json:"profiles"`
+	}
+	if err := getJSON(baseURL, "/api/config/profiles", &resp); err != nil {
+		return err
+	}
+
+	if jsonOutput {
+		return printJSON(resp)
+	}
+
+	fmt.Println()
+	fmt.Println(header("  CONFIG PROFILES"))
+	fmt.Printf("  %s %s\n", colorize(dim, "Directory:"), resp.ConfigDir)
+
+	if len(resp.Profiles) == 0 {
+		fmt.Println(colorize(dim, "  ────────────────────────"))
+		fmt.Println("  No profiles found.")
+		fmt.Printf("\n  Create one with:\n    cp configs/example.toml %s/config.toml\n", resp.ConfigDir)
+	} else {
+		t := newTable("  ", "Name", "Path", "Modified")
+		for _, p := range resp.Profiles {
+			modTime := p.ModTime
+			if mt, err := time.Parse(time.RFC3339Nano, p.ModTime); err == nil {
+				modTime = mt.Local().Format("2006-01-02 15:04 MST")
+			}
+			t.row(p.Name, p.Path, modTime)
+		}
+		t.flush()
+	}
+
+	fmt.Println()
 	return nil
 }

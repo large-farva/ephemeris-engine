@@ -26,17 +26,12 @@ func Satellites(baseURL string, jsonOutput bool) error {
 
 	fmt.Println()
 	fmt.Println(header("  SATELLITE CATALOG"))
-	fmt.Println(colorize(dim, "  "+strings.Repeat("─", 46)))
-	fmt.Printf("  %-12s %-12s %s\n",
-		colorize(dim, "Name"),
-		colorize(dim, "NORAD ID"),
-		colorize(dim, "Frequency"),
-	)
-	fmt.Println(colorize(dim, "  "+strings.Repeat("─", 46)))
+
+	t := newTable("  ", "Name", "NORAD ID", "Frequency")
 	for _, s := range resp.Satellites {
-		freqMHz := float64(s.FreqHz) / 1e6
-		fmt.Printf("  %-12s %-12d %.3f MHz\n", s.Name, s.NoradID, freqMHz)
+		t.row(s.Name, fmt.Sprintf("%d", s.NoradID), fmt.Sprintf("%.3f MHz", float64(s.FreqHz)/1e6))
 	}
+	t.flush()
 	fmt.Println()
 
 	return nil
